@@ -1,58 +1,166 @@
-#
-# This is the server logic of a Shiny web application. You can run the 
-# application by clicking 'Run App' above.
-#
-# Find out more about building applications with Shiny here:
-# 
 #    http://shiny.rstudio.com/
 #
-
 library(shiny)
-
+library(caret)
+library(NLP)
+library(wordcloud)
+library(tm)
+library(SnowballC)
+library(reshape2)
+library(RColorBrewer)
+library(dplyr)
+library(tidytext)
+library(plyr)
+library(sqldf)
+require(data.table)#to use set.DT function
+#data_rev <- read.csv("~/Desktop/College course material/Fall_2017/R adv/Project 2/reviewsdata.csv", 
+#                     stringsAsFactors = FALSE)
+data_rev <- read.csv("~/Desktop/College course material/Fall_2017/R adv/Project 2/FewProducts.csv", 
+                     stringsAsFactors = FALSE)
+AFINN <- read.delim(file = "~/Desktop/College course material/Fall_2017/R adv/Project 2/AFINN-111.txt", header = FALSE,   
+                    stringsAsFactors = FALSE) 
+names(AFINN) <- c("word", "score")
+AFINN$word <- tolower(AFINN$word)
+###corpus
+corpus_all <- Corpus(VectorSource(data_rev$Text))
+#remove Punctuation/stopwords
+remove_space <- content_transformer(function(Text,pattern) gsub(pattern,"",Text))
+#corpus_all <-tm_map(corpus_all, function(x) iconv(enc2utf8(x), sub = "byte"))
+#Use line number 25,26 for MAC software and 23 for rest.
+corpus_all <-tm_map(corpus_all, function(x) iconv(x, to='UTF-8-MAC', sub='byte'))
+locale <- Sys.setlocale(category = "LC_ALL", locale = "C") 
+corpus_all <- tm_map(corpus_all,remove_space,"/")
+corpus_all <- tm_map(corpus_all,remove_space,"\\!")
+corpus_all <- tm_map(corpus_all,remove_space,"@")
+corpus_all <- tm_map(corpus_all,removePunctuation)
+corpus_all <- tm_map(corpus_all,content_transformer(tolower))
+#Normalization of reviews
+corpus_all <- tm_map(corpus_all,removeNumbers)
+corpus_text <- corpus_all
+corpus_all <- tm_map(corpus_all,stemDocument)
+corpus_all <- tm_map(corpus_all,stripWhitespace)
+#stopword removal - Not/n't not included + removing 'because','coffee'
+exceptions <- grep(pattern = "not|n't", x = stopwords(), value = TRUE)
+my_stopwords <- c(setdiff(stopwords("en"), exceptions),'br','because','coffee','coffe','flavor','vanilla','dog','chip')
+corpus_all <- tm_map(corpus_all,removeWords,my_stopwords)
+corpus_all <- tm_map(corpus_all,stripWhitespace)
+###Document term matrix creation
+dtm <- DocumentTermMatrix(corpus_text)
+m <- as.matrix(dtm)
+v <- sort(colSums(m),decreasing=TRUE)
+d <- data.frame(word = names(v),freq=v)
+termCount <- head(d, 200)
+freq <- sort(colSums(as.matrix(dtm)))
+##
+dtm1 <- DocumentTermMatrix(corpus_all)
+m1 <- as.matrix(dtm1)
+v1 <- sort(colSums(m1),decreasing=TRUE)
+d1 <- data.frame(word = names(v1),freq=v1)
+termCountNorm<-head(d1, 200)
+freq1 <- colSums(as.matrix(dtm1))
+##
+review_complete <-data.frame(text=(sapply(corpus_all,as.character)),stringsAsFactors = F)
+review_complete <- rename(review_complete,c(text="Normalized"))
+review_table <- cbind(data_rev,review_complete)
+cust_review <- review_table[,c('Id','ProductId','UserId','Text','Normalized')]
+##
+sentiment_count<- c()
+for (i in 1:nrow(cust_review)) {
+  List <- unlist(strsplit(cust_review[i,]$Normalized, " ", fixed= TRUE))
+  q <- 0 
+  for (j in 1: length(List))
+  {
+    y<-0 
+    x<-  match(List[j],AFINN$word,nomatch = 0)
+    y <- AFINN[x,]$score
+    q <- sum(y, q)
+  }
+  sentiment_count <- c(sentiment_count,q)
+}
+review_table1 <- cbind(review_table,sentiment_count)
+head(review_table1,5)
+cust_review1 <- review_table1[,c('Id','ProductId','UserId','Normalized','sentiment_count')]
+avgSc <- sqldf('select ProductId,count(UserId), avg(sentiment_count) from cust_review1
+group by ProductId')
+avgSC_table<-setDT(avgSc)
+top6viewed <- sqldf('select ProductId, count(UserId), avg(sentiment_count) from cust_review1 group by 1 order by 2 desc limit 6')
+top6temp <- sqldf('select ProductId, UserId,sentiment_count,Score from review_table1 where ProductId in (select ProductId from (select ProductId, count(UserId), avg(sentiment_count) from cust_review1 group by 1 order by 2 desc limit 6))')
+tempID1 <- split(top6temp, top6temp$ProductId)
+####summary
+# Define UI for application that draws a histogram
+text1 <- "There is a mismatch between calculated sentiment count and rating given by user.After having a closer look at the data this mismatch appears mainly   for two following reasons:"
+text2<- "1) Many users used negation words to express their sentiments. 'Not' is one such example with very high frequency of occuring. Here 'Not good' will   have a sentiment count of 'Not' which is -1 and good which is +3 making it a positive sentiment but user communicated a negative sentimnet."
+text3<-"2) Some users used small words like 'good' and a higher rating.Where sentiment count of single word is less than multiple strong words."
+text4<- "As 'Not' is used extensively in dataset as negation word so, rather considering each word as single word we can simply ignore the word following 'Not' or check its sentiment count and if it is positive then    assign equal negative sentiment count. Example in 'not good' we can either ignore good following not or check its sentiment count and if it is positive(3 here) then assign -3 to it which will make sentiment count of 'not good' -4 insteas of +2"
+####Shiny
+ui <- fluidPage(
+  
+  titlePanel("Sentiment Analysis"),
+  navlistPanel(
+    tabPanel("Table-normalized data", tableOutput("view")),
+    tabPanel("Word frequecy raw data", tableOutput("raw1")),
+    tabPanel("Word frequecy processed data", tableOutput("view1")),
+    tabPanel("Wordcloud raw data", plotOutput("fmr")),
+    tabPanel("Wordcloud processed data", plotOutput("betw")),
+    tabPanel("AFINN score", tableOutput("view2")),
+    tabPanel("Average sentiment score", tableOutput("view3")),
+    tabPanel("Top 6 reviewed", tableOutput("view4")),
+    tabPanel("Scatter plots",plotOutput("plot1")),
+    tabPanel("Summary", verbatimTextOutput("summary"),verbatimTextOutput("summary1"))
+  ))
 # Define server logic required to draw a histogram
-shinyServer(function(input, output) {
-   
-  output$distPlot <- renderPlot({
+server <- function(input, output) {
+  output$view <- renderTable({
+    cust_review
+  })
+  output$raw1 <- renderTable({
+    termCount
+  })
+  output$fmr <- renderPlot({
+    wordcloud(words = d$word, freq = d$freq, min.freq = 1,scale=c(6,.8),
+              max.words=200, random.order=FALSE, 
+              colors=brewer.pal(8, "Dark2"))
+  })
+  output$view1 <- renderTable({
+    termCountNorm
+  })
+  output$betw <- renderPlot({
+    wordcloud(words = d1$word, freq = d1$freq, min.freq = 1,
+              max.words=200, random.order=FALSE, 
+              colors=brewer.pal(8, "Dark2"))
+  })
+  output$view2 <- renderTable({
+    cust_review1
+  })
+  output$view3 <- renderTable({
+    avgSC_table
+  })
+  output$view4 <- renderTable({
+    top6viewed
+  })
+  output$plot1 <- renderPlot({
+    par(mfrow = c(3, 2))
     
-    # generate bins based on input$bins from ui.R
-    x    <- faithful[, 2] 
-    bins <- seq(min(x), max(x), length.out = input$bins + 1)
-    
-    # draw the histogram with the specified number of bins
-    hist(x, breaks = bins, col = 'darkgray', border = 'white')
-    
+    plot(tempID1[[1]]$sentiment_count, tempID1[[1]]$Score, main="Scatterplot 1", 
+         xlab="Sentiment score calculated ", ylab="Rating by user", pch=19)
+    plot(tempID1[[2]]$sentiment_count, tempID1[[2]]$Score, main="Scatterplot 2", 
+         xlab="Sentiment score calculated ", ylab="Rating by user", pch=19)
+    plot(tempID1[[3]]$sentiment_count, tempID1[[3]]$Score, main="Scatterplot 3", 
+         xlab="Sentiment score calculated ", ylab="Rating by user", pch=19)
+    plot(tempID1[[4]]$sentiment_count, tempID1[[4]]$Score, main="Scatterplot 4", 
+         xlab="Sentiment score calculated ", ylab="Rating by user", pch=19)
+    plot(tempID1[[5]]$sentiment_count, tempID1[[5]]$Score, main="Scatterplot 5", 
+         xlab="Sentiment score calculated ", ylab="Rating by user", pch=19)
+    plot(tempID1[[6]]$sentiment_count, tempID1[[6]]$Score, main="Scatterplot 6", 
+         xlab="Sentiment score calculated ", ylab="Rating by user", pch=19)
   })
   
-})
-# This is the user-interface definition of a Shiny web application. You can
-# run the application by clicking 'Run App' above.
-#
-# Find out more about building applications with Shiny here:
-# 
-#    http://shiny.rstudio.com/
-#
-
-library(shiny)
-
-# Define UI for application that draws a histogram
-shinyUI(fluidPage(
-  
-  # Application title
-  titlePanel("Old Faithful Geyser Data"),
-  
-  # Sidebar with a slider input for number of bins 
-  sidebarLayout(
-    sidebarPanel(
-       sliderInput("bins",
-                   "Number of bins:",
-                   min = 1,
-                   max = 50,
-                   value = 30)
-    ),
-    
-    # Show a plot of the generated distribution
-    mainPanel(
-       plotOutput("distPlot")
-    )
-  )
-))
+  output$summary <- renderPrint({
+    cat(text1, text2,text3,sep = "\n")
+  })
+  output$summary1 <- renderPrint({
+   cat( "Suggestions: ",text4,sep = "\n")
+  })
+}
+###### Run the application #######
+shinyApp(ui = ui, server = server)
